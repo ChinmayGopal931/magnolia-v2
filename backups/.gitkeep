@@ -1,0 +1,3 @@
+# Database backups will be stored here
+# Backups are created with: make db-backup
+# Files are named: backup_YYYYMMDD_HHMMSS.sql.gz

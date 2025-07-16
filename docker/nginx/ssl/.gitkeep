@@ -1,0 +1,3 @@
+# Place SSL certificates here for production
+# - cert.pem: SSL certificate
+# - key.pem: Private key

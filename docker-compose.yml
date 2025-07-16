@@ -1,0 +1,93 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: magnolia_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: magnolia_v2
+      POSTGRES_USER: magnolia_user
+      POSTGRES_PASSWORD: magnolia_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U magnolia_user -d magnolia_v2"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - magnolia_network
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: magnolia_app
+    restart: unless-stopped
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://magnolia_user:magnolia_password@postgres:5432/magnolia_v2
+      PORT: 3000
+      HYPERLIQUID_API_URL: https://api.hyperliquid.xyz
+      HYPERLIQUID_CHAIN: Testnet
+      HYPERLIQUID_SIGNATURE_CHAIN_ID: "0x66eee"
+      API_SECRET_KEY: dev-secret-key-change-in-production
+      ALLOWED_ORIGINS: http://localhost:3000,http://localhost:5173,http://localhost:3001
+      RATE_LIMIT_WINDOW_MS: 900000
+      RATE_LIMIT_MAX_REQUESTS: 100
+      LOG_LEVEL: debug
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./src:/app/src
+      - ./package.json:/app/package.json
+      - ./tsconfig.json:/app/tsconfig.json
+      - ./drizzle.config.ts:/app/drizzle.config.ts
+      - ./.env:/app/.env
+      - node_modules:/app/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: npm run dev
+    networks:
+      - magnolia_network
+
+  # Optional: Drizzle Studio for database management
+  drizzle-studio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: magnolia_drizzle_studio
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://magnolia_user:magnolia_password@postgres:5432/magnolia_v2
+    ports:
+      - "4983:4983"
+    volumes:
+      - ./src:/app/src
+      - ./drizzle.config.ts:/app/drizzle.config.ts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: npm run db:studio
+    networks:
+      - magnolia_network
+    profiles:
+      - tools
+
+volumes:
+  postgres_data:
+    driver: local
+  node_modules:
+    driver: local
+
+networks:
+  magnolia_network:
+    driver: bridge

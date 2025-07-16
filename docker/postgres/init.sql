@@ -1,0 +1,219 @@
+-- Create database if it doesn't exist
+CREATE DATABASE delta_neutral_trader;
+
+-- Connect to the database
+\c delta_neutral_trader;
+
+-- Create enums
+CREATE TYPE dex_type AS ENUM ('hyperliquid', 'drift');
+CREATE TYPE account_type AS ENUM ('master', 'agent_wallet', 'subaccount');
+CREATE TYPE order_side AS ENUM ('buy', 'sell');
+CREATE TYPE order_status AS ENUM (
+    'pending', 
+    'open', 
+    'filled', 
+    'cancelled', 
+    'rejected',
+    'failed',
+    'triggered',
+    'marginCanceled',
+    'liquidatedCanceled',
+    'expired'
+);
+CREATE TYPE position_status AS ENUM ('open', 'closed', 'liquidated');
+CREATE TYPE position_type AS ENUM ('single', 'delta_neutral');
+CREATE TYPE leg_side AS ENUM ('long', 'short');
+
+-- Users table
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    wallet_address VARCHAR(255) UNIQUE NOT NULL,
+    email VARCHAR(255),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+-- DEX Accounts table
+CREATE TABLE dex_accounts (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    dex_type dex_type NOT NULL,
+    address VARCHAR(255) NOT NULL,
+    account_type account_type NOT NULL,
+    encrypted_private_key TEXT,
+    agent_name VARCHAR(255),
+    subaccount_id INTEGER,
+    nonce NUMERIC(20, 0),
+    is_active BOOLEAN DEFAULT true NOT NULL,
+    metadata JSONB DEFAULT '{}' NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    UNIQUE(dex_type, address),
+    CONSTRAINT check_hyperliquid_agent CHECK (
+        (dex_type = 'hyperliquid' AND account_type = 'agent_wallet' AND encrypted_private_key IS NOT NULL) OR
+        (dex_type = 'hyperliquid' AND account_type != 'agent_wallet' AND encrypted_private_key IS NULL) OR
+        (dex_type != 'hyperliquid')
+    ),
+    CONSTRAINT check_drift_subaccount CHECK (
+        (dex_type = 'drift' AND account_type = 'subaccount' AND subaccount_id IS NOT NULL) OR
+        (dex_type = 'drift' AND account_type != 'subaccount') OR
+        (dex_type != 'drift')
+    )
+);
+
+-- Hyperliquid Orders table
+CREATE TABLE hyperliquid_orders (
+    id SERIAL PRIMARY KEY,
+    dex_account_id INTEGER NOT NULL REFERENCES dex_accounts(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    hl_order_id BIGINT,
+    client_order_id VARCHAR(255) UNIQUE,
+    asset VARCHAR(50) NOT NULL,
+    side order_side NOT NULL,
+    order_type VARCHAR(20) NOT NULL CHECK (order_type IN ('market', 'limit', 'trigger_market', 'trigger_limit', 'oracle')),
+    price NUMERIC(30, 10),
+    size NUMERIC(30, 10) NOT NULL,
+    filled_size NUMERIC(30, 10) DEFAULT 0,
+    avg_fill_price NUMERIC(30, 10),
+    status order_status NOT NULL DEFAULT 'pending',
+    reduce_only BOOLEAN DEFAULT false,
+    post_only BOOLEAN DEFAULT false,
+    time_in_force VARCHAR(10) CHECK (time_in_force IN ('Alo', 'Ioc', 'Gtc')),
+    trigger_price NUMERIC(30, 10),
+    trigger_condition VARCHAR(10) CHECK (trigger_condition IN ('tp', 'sl')),
+    oracle_price_offset NUMERIC(30, 10),
+    auction_start_price NUMERIC(30, 10),
+    auction_end_price NUMERIC(30, 10),
+    auction_duration INTEGER,
+    signature TEXT,
+    nonce NUMERIC(20, 0),
+    builder_fee NUMERIC(10, 4),
+    raw_response JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+-- Drift Orders table
+CREATE TABLE drift_orders (
+    id SERIAL PRIMARY KEY,
+    dex_account_id INTEGER NOT NULL REFERENCES dex_accounts(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    drift_order_id VARCHAR(255),
+    client_order_id VARCHAR(255) UNIQUE,
+    market_index INTEGER NOT NULL,
+    market_type VARCHAR(10) NOT NULL CHECK (market_type IN ('PERP', 'SPOT')),
+    direction VARCHAR(10) NOT NULL CHECK (direction IN ('long', 'short')),
+    base_asset_amount NUMERIC(30, 10) NOT NULL,
+    price NUMERIC(30, 10),
+    filled_amount NUMERIC(30, 10) DEFAULT 0,
+    avg_fill_price NUMERIC(30, 10),
+    status order_status NOT NULL DEFAULT 'pending',
+    order_type VARCHAR(20) NOT NULL CHECK (order_type IN ('market', 'limit', 'trigger_market', 'trigger_limit', 'oracle')),
+    reduce_only BOOLEAN DEFAULT false,
+    post_only BOOLEAN DEFAULT false,
+    immediate_or_cancel BOOLEAN DEFAULT false,
+    max_ts BIGINT,
+    trigger_price NUMERIC(30, 10),
+    trigger_condition VARCHAR(10) CHECK (trigger_condition IN ('above', 'below')),
+    oracle_price_offset NUMERIC(30, 10),
+    auction_duration INTEGER,
+    auction_start_price NUMERIC(30, 10),
+    auction_end_price NUMERIC(30, 10),
+    raw_params JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+-- Positions table
+CREATE TABLE positions (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    position_type position_type NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    status position_status NOT NULL DEFAULT 'open',
+    total_pnl NUMERIC(30, 10) DEFAULT 0,
+    metadata JSONB DEFAULT '{}' NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    closed_at TIMESTAMP WITH TIME ZONE,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT check_closed_position CHECK (
+        (status IN ('closed', 'liquidated') AND closed_at IS NOT NULL) OR
+        (status = 'open' AND closed_at IS NULL)
+    )
+);
+
+-- Position Legs table
+CREATE TABLE position_legs (
+    id SERIAL PRIMARY KEY,
+    position_id INTEGER NOT NULL REFERENCES positions(id) ON DELETE CASCADE,
+    leg_side leg_side NOT NULL,
+    dex_type dex_type NOT NULL,
+    hyperliquid_order_id INTEGER REFERENCES hyperliquid_orders(id) ON DELETE CASCADE,
+    drift_order_id INTEGER REFERENCES drift_orders(id) ON DELETE CASCADE,
+    entry_price NUMERIC(30, 10) NOT NULL,
+    size NUMERIC(30, 10) NOT NULL,
+    current_price NUMERIC(30, 10),
+    unrealized_pnl NUMERIC(30, 10) DEFAULT 0,
+    realized_pnl NUMERIC(30, 10) DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT check_order_reference CHECK (
+        (dex_type = 'hyperliquid' AND hyperliquid_order_id IS NOT NULL AND drift_order_id IS NULL) OR
+        (dex_type = 'drift' AND drift_order_id IS NOT NULL AND hyperliquid_order_id IS NULL)
+    ),
+    CONSTRAINT unique_position_leg UNIQUE (position_id, leg_side)
+);
+
+-- Create indexes
+CREATE INDEX idx_users_wallet ON users(wallet_address);
+CREATE INDEX idx_users_email ON users(email);
+
+CREATE INDEX idx_dex_accounts_user_dex ON dex_accounts(user_id, dex_type);
+CREATE INDEX idx_dex_accounts_address ON dex_accounts(address);
+CREATE INDEX idx_dex_accounts_active ON dex_accounts(is_active);
+
+CREATE INDEX idx_hl_orders_user ON hyperliquid_orders(user_id);
+CREATE INDEX idx_hl_orders_account ON hyperliquid_orders(dex_account_id);
+CREATE INDEX idx_hl_orders_status ON hyperliquid_orders(status);
+CREATE INDEX idx_hl_orders_client_id ON hyperliquid_orders(client_order_id);
+CREATE INDEX idx_hl_orders_asset_status ON hyperliquid_orders(asset, status);
+CREATE INDEX idx_hl_orders_created ON hyperliquid_orders(created_at DESC);
+
+CREATE INDEX idx_drift_orders_user ON drift_orders(user_id);
+CREATE INDEX idx_drift_orders_account ON drift_orders(dex_account_id);
+CREATE INDEX idx_drift_orders_status ON drift_orders(status);
+CREATE INDEX idx_drift_orders_client_id ON drift_orders(client_order_id);
+CREATE INDEX idx_drift_orders_market_status ON drift_orders(market_index, status);
+CREATE INDEX idx_drift_orders_created ON drift_orders(created_at DESC);
+
+CREATE INDEX idx_positions_user_status ON positions(user_id, status);
+CREATE INDEX idx_positions_type_status ON positions(position_type, status);
+CREATE INDEX idx_positions_created ON positions(created_at DESC);
+
+CREATE INDEX idx_position_legs_position ON position_legs(position_id);
+CREATE INDEX idx_position_legs_hl_order ON position_legs(hyperliquid_order_id);
+CREATE INDEX idx_position_legs_drift_order ON position_legs(drift_order_id);
+
+-- Create updated_at trigger function
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+-- Apply updated_at triggers
+CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON users
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_dex_accounts_updated_at BEFORE UPDATE ON dex_accounts
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_hyperliquid_orders_updated_at BEFORE UPDATE ON hyperliquid_orders
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_drift_orders_updated_at BEFORE UPDATE ON drift_orders
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_positions_updated_at BEFORE UPDATE ON positions
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
