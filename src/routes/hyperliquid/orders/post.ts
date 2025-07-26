@@ -52,6 +52,7 @@ export const placeOrderHandler = async (
     const ctx = req.context as RequestContext;
     const { dexAccountId } = req.params;
     
+    // Use non-SDK implementation
     const result = await hyperliquidService.placeOrder(
       ctx,
       Number(dexAccountId),

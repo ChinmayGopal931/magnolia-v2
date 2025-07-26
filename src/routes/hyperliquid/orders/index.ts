@@ -1,5 +1,8 @@
-import { Router } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { validateRequest } from '@/middleware/validation';
+import { authenticateUser } from '@/middleware/auth';
+import { HyperliquidService } from '@/services/hyperliquid';
+import { RequestContext } from '@/types/common';
 import { getOrdersHandler, getOrdersParamsSchema, getOrdersQuerySchema } from './get';
 import { placeOrderHandler, placeOrderParamsSchema, placeOrderBodySchema } from './post';
 import { 
@@ -9,6 +12,11 @@ import {
   cancelOrderBodySchema,
   cancelByCloidBodySchema 
 } from './cancel';
+import {
+  closePositionHandler,
+  closePositionParamsSchema,
+  closePositionBodySchema
+} from './close-position';
 
 const router = Router({ mergeParams: true });
 
@@ -62,6 +70,50 @@ router.post(
     body: cancelByCloidBodySchema,
   }),
   cancelOrderByCloidHandler
+);
+
+/**
+ * POST /api/hyperliquid/dex-accounts/:dexAccountId/orders/close-position
+ * Close a position with a market order
+ */
+router.post(
+  '/close-position',
+  validateRequest({
+    params: closePositionParamsSchema,
+    body: closePositionBodySchema,
+  }),
+  closePositionHandler
+);
+
+/**
+ * POST /api/hyperliquid/dex-accounts/:dexAccountId/orders/test-sdk
+ * Test placing orders using the SDK
+ */
+router.post(
+  '/test-sdk',
+  authenticateUser,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const hyperliquidService = new HyperliquidService();
+      const { dexAccountId } = req.params;
+      const orderData = req.body;
+      const ctx = req.context as RequestContext;
+
+      const result = await hyperliquidService.placeOrderWithSDK(
+        ctx,
+        parseInt(dexAccountId),
+        orderData
+      );
+
+      res.json({
+        success: true,
+        data: result,
+        message: 'Order placed using SDK'
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
 );
 
 export default router;

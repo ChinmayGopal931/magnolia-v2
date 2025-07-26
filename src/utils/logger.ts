@@ -27,7 +27,23 @@ const devFormat = winston.format.printf(({ level, message, timestamp, service, .
   // Add other metadata if present
   const metadataKeys = Object.keys(metadata);
   if (metadataKeys.length > 0) {
-    msg += '\n  ' + metadataKeys.map(key => `${key}: ${JSON.stringify(metadata[key])}`).join('\n  ');
+    msg += '\n  ' + metadataKeys.map(key => {
+      try {
+        // Handle BigInt serialization
+        const value = metadata[key];
+        if (typeof value === 'bigint') {
+          return `${key}: ${value.toString()}n`;
+        }
+        // Handle objects that might contain BigInt
+        const stringified = JSON.stringify(value, (_, v) => 
+          typeof v === 'bigint' ? v.toString() + 'n' : v
+        );
+        return `${key}: ${stringified}`;
+      } catch (e) {
+        // Fallback for any serialization errors
+        return `${key}: [Unable to serialize: ${String(metadata[key])}]`;
+      }
+    }).join('\n  ');
   }
   
   return msg;

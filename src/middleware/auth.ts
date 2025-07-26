@@ -3,6 +3,8 @@ import { ApiError, ErrorCode, RequestContext } from '@/types/common';
 import { DatabaseRepository } from '@/db/repository';
 import { ethers } from 'ethers';
 import { logger } from '@/utils/logger';
+import nacl from 'tweetnacl';
+import bs58 from 'bs58';
 
 // Extend Express Request type
 declare global {
@@ -53,7 +55,7 @@ export async function authenticateUser(
     // Verify timestamp (prevent replay attacks)
     const requestTime = parseInt(timestamp);
     const now = Math.floor(Date.now() / 1000); // Convert to seconds
-    const maxAge = 5 * 60; // 5 minutes in seconds
+    const maxAge = 15 * 60; // 15 minutes in seconds
     
     if (isNaN(requestTime) || Math.abs(now - requestTime) > maxAge) {
       throw new ApiError(
@@ -65,12 +67,60 @@ export async function authenticateUser(
 
     // Verify signature
     const message = `Authenticate to Magnolia\nAddress: ${address}\nTimestamp: ${timestamp}`;
-    const recoveredAddress = ethers.verifyMessage(message, signature);
     
-    if (recoveredAddress.toLowerCase() !== address.toLowerCase()) {
+    // Detect wallet type based on address format
+    const isEthereumAddress = address.startsWith('0x') && address.length === 42;
+    const isSolanaAddress = !isEthereumAddress && address.length >= 32 && address.length <= 44;
+    
+    if (isEthereumAddress) {
+      // Verify Ethereum signature
+      const recoveredAddress = ethers.verifyMessage(message, signature);
+      
+      if (recoveredAddress.toLowerCase() !== address.toLowerCase()) {
+        throw new ApiError(
+          ErrorCode.UNAUTHORIZED,
+          'Invalid Ethereum signature',
+          401
+        );
+      }
+    } else if (isSolanaAddress) {
+      // Verify Solana signature
+      try {
+        // Decode the base58 public key
+        const publicKey = bs58.decode(address);
+        
+        // Convert hex signature to Uint8Array
+        const signatureBytes = Buffer.from(signature, 'hex');
+        
+        // Convert message to bytes
+        const messageBytes = new TextEncoder().encode(message);
+        
+        // Verify the signature
+        const isValid = nacl.sign.detached.verify(
+          messageBytes,
+          signatureBytes,
+          publicKey
+        );
+        
+        if (!isValid) {
+          throw new ApiError(
+            ErrorCode.UNAUTHORIZED,
+            'Invalid Solana signature',
+            401
+          );
+        }
+      } catch (error) {
+        logger.error('Solana signature verification failed', { error, address });
+        throw new ApiError(
+          ErrorCode.UNAUTHORIZED,
+          'Invalid Solana signature',
+          401
+        );
+      }
+    } else {
       throw new ApiError(
         ErrorCode.UNAUTHORIZED,
-        'Invalid signature',
+        'Invalid wallet address format',
         401
       );
     }

@@ -3,6 +3,18 @@ import { ApiError, ErrorCode, RequestContext } from '@/types/common';
 import { logger } from '@/utils/logger';
 import { driftClientConfig } from '@/services/drift-client';
 import { dexConfig } from '@/config/dex.config';
+import { 
+  DriftClient, 
+  BN, 
+  PositionDirection, 
+  OrderType, 
+  MarketType,
+  PostOnlyParams,
+  OrderTriggerCondition,
+  PRICE_PRECISION
+} from '@drift-labs/sdk';
+import { PublicKey, Keypair, Connection } from '@solana/web3.js';
+import bs58 from 'bs58';
 
 export class DriftService {
   private db: DatabaseRepository;
@@ -11,12 +23,7 @@ export class DriftService {
   constructor() {
     this.db = new DatabaseRepository();
     this.config = driftClientConfig.getConfig();
-    
-    logger.info('DriftService initialized', {
-      environment: dexConfig.getEnvironment(),
-      programId: this.config.programId,
-      env: this.config.env,
-    });
+  
   }
 
   /**
@@ -32,10 +39,14 @@ export class DriftService {
     const existingAccount = await this.db.getDexAccountByAddress(data.address, 'drift');
     
     if (existingAccount) {
-      // Update existing account
-      return await this.db.updateDexAccount(existingAccount.id, {
-        metadata: data.metadata,
-      });
+      // If metadata is provided, update the account
+      if (data.metadata !== undefined) {
+        return await this.db.updateDexAccount(existingAccount.id, {
+          metadata: data.metadata,
+        });
+      }
+      // Otherwise, just return the existing account
+      return existingAccount;
     }
 
     // Create new account
@@ -442,5 +453,311 @@ export class DriftService {
       rpcUrl: this.config.rpcUrl,
       dataApiUrl: this.config.dataApiUrl,
     };
+  }
+
+  /**
+   * Place order using backend wallet on behalf of user
+   * This uses the MAGNOLIA_SOLANA_PRIVATE_KEY to sign and submit orders
+   */
+  async placeDelegateOrder(
+    ctx: RequestContext,
+    dexAccountId: number,
+    orderParams: {
+      marketIndex: number;
+      marketType: 'PERP' | 'SPOT';
+      direction: 'long' | 'short';
+      baseAssetAmount: string;
+      orderType: 'market' | 'limit' | 'trigger_market' | 'trigger_limit' | 'oracle';
+      price?: string;
+      reduceOnly?: boolean;
+      postOnly?: boolean;
+      immediateOrCancel?: boolean;
+      maxTs?: string;
+      triggerPrice?: string;
+      triggerCondition?: 'above' | 'below';
+      oraclePriceOffset?: string;
+      auctionDuration?: number;
+      auctionStartPrice?: string;
+      auctionEndPrice?: string;
+      userOrderId?: number;
+    }
+  ) {
+    // Verify access to DEX account
+    const dexAccount = await this.db.getDexAccount(dexAccountId);
+    if (!dexAccount || dexAccount.userId !== ctx.userId) {
+      throw new ApiError(ErrorCode.FORBIDDEN, 'Access denied to this account');
+    }
+
+    // Get the backend private key from environment
+    const privateKeyString = process.env.MAGNOLIA_SOLANA_PRIVATE_KEY;
+    if (!privateKeyString) {
+      throw new ApiError(ErrorCode.INTERNAL_ERROR, 'Backend wallet not configured');
+    }
+
+    try {
+      // Initialize DriftClient with backend wallet
+      const privateKeyBytes = bs58.decode(privateKeyString);
+      const keypair = Keypair.fromSecretKey(privateKeyBytes);
+      
+      // Create connection from RPC URL
+      const connection = new Connection(this.config.rpcUrl, 'confirmed');
+      
+      // Create wallet adapter
+  const wallet = {
+    publicKey: keypair.publicKey,
+    signTransaction: async (tx: any) => {
+      // Check if it's a VersionedTransaction by looking for the 'sign' method
+      // and absence of 'partialSign' method
+      if (tx.sign && !tx.partialSign) {
+        // It's a VersionedTransaction
+        tx.sign([keypair]);
+      } else if (tx.partialSign) {
+        // It's a legacy Transaction
+        tx.partialSign(keypair);
+      } else {
+        // Fallback: try both methods
+        try {
+          tx.sign([keypair]);
+        } catch {
+          tx.partialSign(keypair);
+        }
+      }
+      return tx;
+    },
+    signAllTransactions: async (txs: any[]) => {
+      // Same logic for multiple transactions
+      txs.forEach(tx => {
+        if (tx.sign && !tx.partialSign) {
+          tx.sign([keypair]);
+        } else if (tx.partialSign) {
+          tx.partialSign(keypair);
+        } else {
+          try {
+            tx.sign([keypair]);
+          } catch {
+            tx.partialSign(keypair);
+          }
+        }
+      });
+      return txs;
+    }
+  };
+
+      // Initialize DriftClient for delegate trading
+      const driftClient = new DriftClient({
+        connection,
+        wallet,
+        env: this.config.env as 'mainnet-beta' | 'devnet',
+        programID: new PublicKey(this.config.programId),
+        authority: new PublicKey(dexAccount.address), // User's authority
+        activeSubAccountId: dexAccount.subaccountId || 0,
+        includeDelegates: false,
+        authoritySubAccountMap: new Map([
+          [dexAccount.address, [dexAccount.subaccountId || 0]]
+        ]),
+      });
+
+      await driftClient.subscribe();
+
+      logger.info('Initialized DriftClient for delegate order', {
+        authority: dexAccount.address,
+        subAccountId: dexAccount.subaccountId,
+        marketType: orderParams.marketType,
+        marketIndex: orderParams.marketIndex,
+      });
+
+      // Convert order parameters
+      const direction = orderParams.direction === 'long' 
+        ? PositionDirection.LONG 
+        : PositionDirection.SHORT;
+
+      const marketType = orderParams.marketType === 'PERP' 
+        ? MarketType.PERP 
+        : MarketType.SPOT;
+
+      // Convert amounts based on market type
+      let baseAssetAmount: BN;
+      if (marketType === MarketType.PERP) {
+        // For perps, use BASE_PRECISION (1e9)
+        baseAssetAmount = new BN(parseFloat(orderParams.baseAssetAmount) * 1e9);
+      } else {
+        // For spot markets, get the precision from the market
+        const spotMarket = driftClient.getSpotMarketAccount(orderParams.marketIndex);
+        if (!spotMarket) {
+          throw new ApiError(ErrorCode.INVALID_REQUEST, 'Invalid spot market index');
+        }
+        const precision = 10 ** spotMarket.decimals;
+        baseAssetAmount = new BN(parseFloat(orderParams.baseAssetAmount) * precision);
+      }
+
+      // Build order params for SDK
+      // Generate a unique userOrderId if not provided
+      // userOrderId must be 0-255 (u8 type in Drift)
+      // Use seconds modulo 255 to ensure it fits
+      const userOrderId = orderParams.userOrderId || (Math.floor(Date.now() / 1000) % 255);
+      
+      logger.info('Generated userOrderId', {
+        userOrderId,
+        providedId: orderParams.userOrderId,
+        timestamp: Math.floor(Date.now() / 1000)
+      });
+      
+      const sdkOrderParams: any = {
+        marketIndex: orderParams.marketIndex,
+        marketType,
+        direction,
+        baseAssetAmount,
+        userOrderId,
+        reduceOnly: orderParams.reduceOnly || false,
+      };
+
+      // Set order type and related parameters
+      switch (orderParams.orderType) {
+        case 'market':
+          sdkOrderParams.orderType = OrderType.MARKET;
+          if (orderParams.auctionStartPrice) {
+            sdkOrderParams.auctionStartPrice = new BN(parseFloat(orderParams.auctionStartPrice) * PRICE_PRECISION.toNumber());
+          }
+          if (orderParams.auctionEndPrice) {
+            sdkOrderParams.auctionEndPrice = new BN(parseFloat(orderParams.auctionEndPrice) * PRICE_PRECISION.toNumber());
+          }
+          if (orderParams.auctionDuration) {
+            sdkOrderParams.auctionDuration = orderParams.auctionDuration;
+          }
+          break;
+
+        case 'limit':
+          sdkOrderParams.orderType = OrderType.LIMIT;
+          if (!orderParams.price) {
+            throw new ApiError(ErrorCode.INVALID_REQUEST, 'Price required for limit orders');
+          }
+          sdkOrderParams.price = new BN(parseFloat(orderParams.price) * PRICE_PRECISION.toNumber());
+          
+          if (orderParams.postOnly) {
+            sdkOrderParams.postOnly = orderParams.immediateOrCancel 
+              ? PostOnlyParams.NONE 
+              : PostOnlyParams.TRY_POST_ONLY;
+          }
+          break;
+
+        case 'trigger_market':
+          sdkOrderParams.orderType = OrderType.TRIGGER_MARKET;
+          if (!orderParams.triggerPrice) {
+            throw new ApiError(ErrorCode.INVALID_REQUEST, 'Trigger price required for trigger orders');
+          }
+          sdkOrderParams.triggerPrice = new BN(parseFloat(orderParams.triggerPrice) * PRICE_PRECISION.toNumber());
+          sdkOrderParams.triggerCondition = orderParams.triggerCondition === 'above' 
+            ? OrderTriggerCondition.ABOVE 
+            : OrderTriggerCondition.BELOW;
+          break;
+
+        case 'trigger_limit':
+          sdkOrderParams.orderType = OrderType.TRIGGER_LIMIT;
+          if (!orderParams.triggerPrice || !orderParams.price) {
+            throw new ApiError(ErrorCode.INVALID_REQUEST, 'Trigger price and price required for trigger limit orders');
+          }
+          sdkOrderParams.triggerPrice = new BN(parseFloat(orderParams.triggerPrice) * PRICE_PRECISION.toNumber());
+          sdkOrderParams.price = new BN(parseFloat(orderParams.price) * PRICE_PRECISION.toNumber());
+          sdkOrderParams.triggerCondition = orderParams.triggerCondition === 'above' 
+            ? OrderTriggerCondition.ABOVE 
+            : OrderTriggerCondition.BELOW;
+          break;
+
+        case 'oracle':
+          sdkOrderParams.orderType = OrderType.ORACLE;
+          if (orderParams.oraclePriceOffset) {
+            sdkOrderParams.oraclePriceOffset = new BN(parseFloat(orderParams.oraclePriceOffset) * PRICE_PRECISION.toNumber()).toNumber();
+          }
+          break;
+      }
+
+      // Set max timestamp if provided
+      if (orderParams.maxTs) {
+        sdkOrderParams.maxTs = new BN(orderParams.maxTs);
+      }
+
+      // Place the order
+      let txSig: string;
+      if (marketType === MarketType.PERP) {
+        txSig = await driftClient.placePerpOrder(sdkOrderParams);
+      } else {
+        txSig = await driftClient.placeSpotOrder(sdkOrderParams);
+      }
+
+      logger.info('Order placed successfully', {
+        txSignature: txSig,
+        userId: ctx.userId,
+        dexAccountId,
+        authority: dexAccount.address,
+      });
+
+      // Get the order from chain to get the order ID
+      await driftClient.fetchAccounts();
+      const user = driftClient.getUser();
+      const orders = user.getOpenOrders();
+      
+      // Find the order we just placed (it should be the most recent one)
+      const placedOrder = orders[orders.length - 1];
+      
+      // Create order record in database
+      const dbOrder = await this.db.createDriftOrder({
+        dexAccountId,
+        userId: ctx.userId!,
+        driftOrderId: placedOrder?.orderId?.toString(),
+        clientOrderId: placedOrder?.userOrderId?.toString(),
+        marketIndex: orderParams.marketIndex,
+        marketType: orderParams.marketType,
+        direction: orderParams.direction,
+        baseAssetAmount: orderParams.baseAssetAmount,
+        price: orderParams.price,
+        status: 'open',
+        orderType: orderParams.orderType,
+        reduceOnly: orderParams.reduceOnly,
+        postOnly: orderParams.postOnly,
+        immediateOrCancel: orderParams.immediateOrCancel,
+        maxTs: orderParams.maxTs,
+        triggerPrice: orderParams.triggerPrice,
+        triggerCondition: orderParams.triggerCondition,
+        oraclePriceOffset: orderParams.oraclePriceOffset,
+        auctionDuration: orderParams.auctionDuration,
+        auctionStartPrice: orderParams.auctionStartPrice,
+        auctionEndPrice: orderParams.auctionEndPrice,
+        rawParams: {
+          txSignature: txSig,
+          placedAt: new Date().toISOString(),
+          delegateAuthority: keypair.publicKey.toString(),
+        },
+      });
+
+      // Unsubscribe to clean up
+      await driftClient.unsubscribe();
+
+      return {
+        success: true,
+        order: dbOrder,
+        txSignature: txSig,
+        message: 'Order placed successfully using delegate',
+      };
+
+    } catch (error) {
+      logger.error('Failed to place delegate order', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
+        userId: ctx.userId,
+        dexAccountId,
+      });
+      
+      if (error instanceof Error && error.message.includes('User not found')) {
+        throw new ApiError(
+          ErrorCode.INVALID_REQUEST, 
+          'User account not initialized on Drift. Please initialize your account first.'
+        );
+      }
+      
+      throw new ApiError(
+        ErrorCode.INTERNAL_ERROR, 
+        `Failed to place order: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
   }
 }

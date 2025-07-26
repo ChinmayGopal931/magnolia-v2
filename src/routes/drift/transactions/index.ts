@@ -37,7 +37,7 @@ router.post(
  * Get transaction history (deposits and withdrawals)
  */
 router.get(
-  '/',
+  '/transactions',
   validateRequest({
     params: getTransactionHistoryParamsSchema,
     query: getTransactionHistoryQuerySchema,
