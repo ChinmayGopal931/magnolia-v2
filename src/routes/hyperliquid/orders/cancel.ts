@@ -14,7 +14,8 @@ export const cancelOrderParamsSchema = z.object({
 
 export const cancelOrderBodySchema = z.object({
   cancels: z.array(z.object({
-    asset: z.string(),
+    assetSymbol: z.string().min(1), // Asset symbol (e.g., "BTC", "ETH")
+    assetIndex: z.number().int().nonnegative(), // Asset index (numeric ID)
     orderId: z.string(),
   })),
   signature: z.string().optional(),
@@ -23,7 +24,8 @@ export const cancelOrderBodySchema = z.object({
 
 export const cancelByCloidBodySchema = z.object({
   cancels: z.array(z.object({
-    asset: z.string(),
+    assetSymbol: z.string().min(1), // Asset symbol (e.g., "BTC", "ETH")
+    assetIndex: z.number().int().nonnegative(), // Asset index (numeric ID)
     cloid: z.string(),
   })),
   signature: z.string().optional(),

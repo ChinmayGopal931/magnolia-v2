@@ -9,7 +9,7 @@ const hyperliquidService = new HyperliquidService();
  * GET /api/hyperliquid/spot/metadata
  */
 export const getSpotMetadataHandler = async (
-  req: Request,
+  _req: Request,
   res: Response,
   next: NextFunction
 ) => {

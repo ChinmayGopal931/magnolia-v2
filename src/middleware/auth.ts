@@ -125,11 +125,14 @@ export async function authenticateUser(
       );
     }
 
+    // Detect wallet type
+    const walletType = isEthereumAddress ? 'evm' : 'solana';
+    
     // Get or create user
     let user = await db.findUserByWallet(address);
     if (!user) {
-      user = await db.createUser(address);
-      logger.info('New user created', { address });
+      user = await db.createUserWithWallet(address, walletType);
+      logger.info('New user created with wallet', { address, walletType });
     }
 
     // Create request context
@@ -159,5 +162,5 @@ export async function authenticateUser(
 }
 
 function generateRequestId(): string {
-  return `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  return `req_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
 }

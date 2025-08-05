@@ -1,0 +1,20 @@
+version = 0.1
+
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "magnolia-v2"
+s3_bucket = "magnolia-sam-deployments-969744961761"
+s3_prefix = "magnolia-v2"
+region = "us-east-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = [
+    "DatabasePassword=ChangeMePlease123!"
+]
+image_repositories = []
+
+[default.build]
+[default.build.parameters]
+cached = true
+parallel = true

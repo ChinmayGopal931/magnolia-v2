@@ -1,0 +1,68 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Magnolia V2 - Minimal Lambda Test
+
+Globals:
+  Function:
+    Runtime: nodejs18.x
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        NODE_ENV: production
+
+Resources:
+  # Minimal API Lambda Function
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: magnolia-api-minimal
+      InlineCode: |
+        const serverlessExpress = require('@vendia/serverless-express');
+        const express = require('express');
+        const cors = require('cors');
+
+        const app = express();
+        app.use(cors());
+        app.use(express.json());
+
+        app.get('/health', (req, res) => {
+          res.json({
+            success: true,
+            message: 'Service is running on AWS Lambda',
+            timestamp: new Date().toISOString()
+          });
+        });
+
+        app.get('/', (req, res) => {
+          res.json({
+            success: true,
+            message: 'Magnolia V2 API - Minimal Deployment',
+            version: '1.0.0'
+          });
+        });
+
+        const serverlessApp = serverlessExpress({ app });
+        exports.handler = (event, context) => serverlessApp(event, context);
+      Handler: index.handler
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+        RootEvent:
+          Type: Api
+          Properties:
+            Path: /
+            Method: ANY
+        HealthCheck:
+          Type: Api
+          Properties:
+            Path: /health
+            Method: GET
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod'

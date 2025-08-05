@@ -1,0 +1,19 @@
+{
+  "name": "magnolia-lambda",
+  "version": "1.0.0",
+  "dependencies": {
+    "@vendia/serverless-express": "^4.12.6",
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "express-rate-limit": "^7.1.5",
+    "winston": "^3.11.0",
+    "zod": "^3.22.4",
+    "dotenv": "^16.3.1",
+    "axios": "^1.10.0",
+    "buffer": "^6.0.3",
+    "bs58": "^6.0.0",
+    "tweetnacl": "^1.0.3",
+    "@aws-sdk/client-ssm": "^3.859.0"
+  }
+}

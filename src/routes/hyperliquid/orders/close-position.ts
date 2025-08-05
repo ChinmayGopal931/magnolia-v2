@@ -13,7 +13,8 @@ export const closePositionParamsSchema = z.object({
 });
 
 export const closePositionBodySchema = z.object({
-  asset: z.string(),
+  assetSymbol: z.string().min(1), // Asset symbol (e.g., "BTC", "ETH")
+  assetIndex: z.number().int().nonnegative(), // Asset index (numeric ID)
   size: z.string().optional(), // Optional: if not provided, will close the entire position
 });
 

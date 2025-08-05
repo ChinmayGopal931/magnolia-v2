@@ -2,7 +2,6 @@ import { DatabaseRepository } from '@/db/repository';
 import { ApiError, ErrorCode, RequestContext } from '@/types/common';
 import { logger } from '@/utils/logger';
 import { driftClientConfig } from '@/services/drift-client';
-import { dexConfig } from '@/config/dex.config';
 import { 
   DriftClient, 
   BN, 
@@ -226,6 +225,7 @@ export class DriftService {
         side: driftOrder.direction as 'long' | 'short',
         entryPrice: driftOrder.price || '0',
         currentPrice: driftOrder.price || '0',
+        liquidationPrice: undefined, // Can be calculated based on leverage
         size: driftOrder.baseAssetAmount,
         notionalValue: driftNotional.toString(),
         driftOrderId: data.driftOrderId,
@@ -240,10 +240,11 @@ export class DriftService {
         positionId: position.id,
         dexType: 'hyperliquid',
         dexAccountId: hyperliquidOrder.dexAccountId,
-        symbol: hyperliquidOrder.asset,
+        symbol: hyperliquidOrder.assetSymbol,
         side: hyperliquidOrder.side === 'buy' ? 'long' : 'short',
         entryPrice: hyperliquidOrder.price || '0',
         currentPrice: hyperliquidOrder.price || '0',
+        liquidationPrice: undefined, // Can be calculated based on leverage
         size: hyperliquidOrder.size,
         notionalValue: hlNotional.toString(),
         hyperliquidOrderId: data.hyperliquidOrderId,
@@ -291,7 +292,7 @@ export class DriftService {
       dexType: 'drift',
       dexAccountId,
       symbol: data.tokenSymbol,
-      side: 'long', // Deposits increase balance
+      side: 'spot', // Deposits are spot transactions
       entryPrice: '1',
       currentPrice: '1',
       size: data.amount,
@@ -349,7 +350,7 @@ export class DriftService {
       dexType: 'drift',
       dexAccountId,
       symbol: data.tokenSymbol,
-      side: 'short', // Withdrawals decrease balance
+      side: 'spot', // Withdrawals are spot transactions
       entryPrice: '1',
       currentPrice: '1',
       size: data.amount,
@@ -368,6 +369,107 @@ export class DriftService {
       txSignature: data.txSignature,
       amount: data.amount,
       tokenSymbol: data.tokenSymbol,
+    };
+  }
+
+  /**
+   * Get user's Drift positions
+   */
+  async getUserDriftPositions(
+    ctx: RequestContext,
+    filters?: { status?: string; positionType?: string }
+  ) {
+    // Get all positions for the user
+    const allPositions = await this.db.getUserPositions(ctx.userId!, filters);
+    
+    // Filter to only include positions that have Drift snapshots
+    const driftPositions = [];
+    for (const position of allPositions) {
+      const positionWithSnapshots = await this.db.getPositionWithSnapshots(position.id);
+      if (positionWithSnapshots && positionWithSnapshots.snapshots.some(s => s.dexType === 'drift')) {
+        driftPositions.push(positionWithSnapshots);
+      }
+    }
+    
+    return driftPositions;
+  }
+
+  /**
+   * Update position
+   */
+  async updatePosition(
+    ctx: RequestContext,
+    positionId: number,
+    data: {
+      status?: 'open' | 'closed' | 'liquidated';
+      totalPnl?: string;
+      closedPnl?: string;
+      metadata?: any;
+    }
+  ) {
+    // Verify ownership
+    const position = await this.db.getPositionWithSnapshots(positionId);
+    if (!position || position.userId !== ctx.userId) {
+      throw new ApiError(ErrorCode.FORBIDDEN, 'Access denied to this position');
+    }
+
+    // Verify position has Drift snapshots
+    const hasDriftSnapshot = position.snapshots.some(s => s.dexType === 'drift');
+    if (!hasDriftSnapshot) {
+      throw new ApiError(ErrorCode.INVALID_REQUEST, 'Not a Drift position');
+    }
+
+    // Update position
+    const updated = await this.db.updatePosition(positionId, {
+      ...data,
+      closedAt: data.status === 'closed' || data.status === 'liquidated' ? new Date() : undefined,
+    });
+
+    return await this.db.getPositionWithSnapshots(updated.id);
+  }
+
+  /**
+   * Close a position with market order
+   */
+  async closePositionWithMarketData(
+    ctx: RequestContext,
+    positionId: number,
+    data: {
+      marketIndex: number;
+      marketType: 'PERP' | 'SPOT';
+      size?: string;
+      closedPnl: string;
+    }
+  ): Promise<any> {
+    // Get position details
+    const position = await this.db.getPositionWithSnapshots(positionId);
+    if (!position || position.userId !== ctx.userId) {
+      throw new ApiError(ErrorCode.NOT_FOUND, 'Position not found');
+    }
+
+    if (position.status !== 'open') {
+      throw new ApiError(ErrorCode.INVALID_REQUEST, 'Position is not open');
+    }
+
+    // Get the relevant Drift snapshot
+    const relevantSnapshot = position.snapshots.find(
+      (s) => s.dexType === 'drift' && s.driftOrderId && s.order
+    );
+
+    if (!relevantSnapshot) {
+      throw new ApiError(ErrorCode.NOT_FOUND, 'No Drift order found for this position');
+    }
+
+    // Update position status
+    const updatedPosition = await this.db.updatePosition(positionId, {
+      status: 'closed',
+      closedPnl: data.closedPnl,
+      closedAt: new Date(),
+    });
+
+    return {
+      position: updatedPosition,
+      message: 'Position closed successfully. Please close the position on Drift manually.',
     };
   }
 
@@ -453,6 +555,296 @@ export class DriftService {
       rpcUrl: this.config.rpcUrl,
       dataApiUrl: this.config.dataApiUrl,
     };
+  }
+
+  /**
+   * Close a position on Drift using delegate trading
+   * Places a reduce-only order to close the position
+   */
+  async closePosition(
+    ctx: RequestContext,
+    dexAccountId: number,
+    data: {
+      marketIndex: number;
+      marketType: 'PERP' | 'SPOT';
+      size?: string; // Optional: if not provided, will close the entire position
+    }
+  ): Promise<any> {
+    // Get DEX account
+    const dexAccount = await this.db.getDexAccount(dexAccountId);
+    if (!dexAccount || dexAccount.userId !== ctx.userId) {
+      throw new ApiError(ErrorCode.FORBIDDEN, 'Access denied to this account');
+    }
+
+    // Get the backend private key from environment
+    const privateKeyString = process.env.MAGNOLIA_SOLANA_PRIVATE_KEY;
+    if (!privateKeyString) {
+      throw new ApiError(ErrorCode.INTERNAL_ERROR, 'Backend wallet not configured for delegate trading');
+    }
+
+    try {
+      // Initialize DriftClient with backend wallet
+      const privateKeyBytes = bs58.decode(privateKeyString);
+      const keypair = Keypair.fromSecretKey(privateKeyBytes);
+      
+      // Create connection from RPC URL
+      const connection = new Connection(this.config.rpcUrl, 'confirmed');
+      
+      // Create wallet adapter
+      const wallet = {
+        publicKey: keypair.publicKey,
+        signTransaction: async (tx: any) => {
+          if (tx.sign && !tx.partialSign) {
+            tx.sign([keypair]);
+          } else if (tx.partialSign) {
+            tx.partialSign(keypair);
+          } else {
+            try {
+              tx.sign([keypair]);
+            } catch {
+              tx.partialSign(keypair);
+            }
+          }
+          return tx;
+        },
+        signAllTransactions: async (txs: any[]) => {
+          txs.forEach(tx => {
+            if (tx.sign && !tx.partialSign) {
+              tx.sign([keypair]);
+            } else if (tx.partialSign) {
+              tx.partialSign(keypair);
+            } else {
+              try {
+                tx.sign([keypair]);
+              } catch {
+                tx.partialSign(keypair);
+              }
+            }
+          });
+          return txs;
+        }
+      };
+
+      // Initialize DriftClient for delegate trading
+      const driftClient = new DriftClient({
+        connection,
+        wallet,
+        env: this.config.env as 'mainnet-beta' | 'devnet',
+        programID: new PublicKey(this.config.programId),
+        authority: new PublicKey(dexAccount.address), // User's authority
+        activeSubAccountId: dexAccount.subaccountId || 0,
+        includeDelegates: false,
+        authoritySubAccountMap: new Map([
+          [dexAccount.address, [dexAccount.subaccountId || 0]]
+        ]),
+      });
+
+      await driftClient.subscribe();
+
+      logger.info('Initialized DriftClient for closing position', {
+        authority: dexAccount.address,
+        subAccountId: dexAccount.subaccountId,
+        marketType: data.marketType,
+        marketIndex: data.marketIndex,
+      });
+
+      // Get the user account to check current position
+      const user = driftClient.getUser();
+      
+      // Get the position based on market type
+      let positionSize: BN | undefined;
+      let baseAssetAmount: BN;
+      let direction: PositionDirection;
+      
+      if (data.marketType === 'PERP') {
+        const perpPosition = user.getPerpPosition(data.marketIndex);
+        
+        if (!perpPosition || perpPosition.baseAssetAmount.eq(new BN(0))) {
+          await driftClient.unsubscribe();
+          throw new ApiError(
+            ErrorCode.INVALID_REQUEST,
+            `No open position found for PERP market ${data.marketIndex}`
+          );
+        }
+        
+        positionSize = perpPosition.baseAssetAmount;
+        
+        // Determine closing direction (opposite of position)
+        const isLong = positionSize.gt(new BN(0));
+        direction = isLong ? PositionDirection.SHORT : PositionDirection.LONG;
+        
+        // Use provided size or close entire position
+        if (data.size) {
+          baseAssetAmount = new BN(parseFloat(data.size) * 1e9); // Convert to BASE_PRECISION
+        } else {
+          baseAssetAmount = positionSize.abs(); // Close entire position
+        }
+        
+        logger.info('Closing PERP position', {
+          marketIndex: data.marketIndex,
+          currentPositionSize: positionSize.toString(),
+          closingSize: baseAssetAmount.toString(),
+          closingDirection: direction === PositionDirection.LONG ? 'LONG' : 'SHORT',
+          isFullClose: !data.size
+        });
+        
+      } else {
+        // SPOT market
+        const spotPosition = user.getSpotPosition(data.marketIndex);
+        
+        if (!spotPosition || spotPosition.scaledBalance.eq(new BN(0))) {
+          await driftClient.unsubscribe();
+          throw new ApiError(
+            ErrorCode.INVALID_REQUEST,
+            `No open position found for SPOT market ${data.marketIndex}`
+          );
+        }
+        
+        // For spot, we need to handle token amounts differently
+        const spotMarket = driftClient.getSpotMarketAccount(data.marketIndex);
+        if (!spotMarket) {
+          await driftClient.unsubscribe();
+          throw new ApiError(ErrorCode.INVALID_REQUEST, 'Invalid spot market index');
+        }
+        
+        // Get token amount from scaled balance
+        // For spot positions, scaledBalance represents the actual token amount with precision
+        const tokenAmount = spotPosition.scaledBalance;
+        
+        // Determine if this is a borrow (negative) or deposit (positive)
+        const isDeposit = tokenAmount.gt(new BN(0));
+        direction = isDeposit ? PositionDirection.SHORT : PositionDirection.LONG; // Sell if deposit, buy if borrow
+        
+        // Calculate base asset amount
+        const precision = 10 ** spotMarket.decimals;
+        if (data.size) {
+          baseAssetAmount = new BN(parseFloat(data.size) * precision);
+        } else {
+          // Convert scaled balance to token amount
+          const balancePrecision = new BN(10).pow(new BN(spotMarket.decimals));
+          baseAssetAmount = tokenAmount.abs().div(balancePrecision);
+        }
+        
+        logger.info('Closing SPOT position', {
+          marketIndex: data.marketIndex,
+          currentTokenAmount: tokenAmount.toString(),
+          closingSize: baseAssetAmount.toString(),
+          closingDirection: direction === PositionDirection.LONG ? 'BUY' : 'SELL',
+          isDeposit,
+          isFullClose: !data.size
+        });
+      }
+
+      // Generate a unique userOrderId
+      const userOrderId = Math.floor(Date.now() / 1000) % 255;
+      
+      // Build order params for closing position
+      const orderParams: any = {
+        marketIndex: data.marketIndex,
+        marketType: data.marketType === 'PERP' ? MarketType.PERP : MarketType.SPOT,
+        direction,
+        baseAssetAmount,
+        userOrderId,
+        reduceOnly: true, // Important: This ensures we're only closing, not opening new positions
+        orderType: OrderType.MARKET, // Use market order for immediate execution
+      };
+
+      logger.info('Placing close position order', {
+        orderParams: {
+          ...orderParams,
+          baseAssetAmount: orderParams.baseAssetAmount.toString(),
+        }
+      });
+
+      // Place the order
+      let txSig: string;
+      if (data.marketType === 'PERP') {
+        txSig = await driftClient.placePerpOrder(orderParams);
+      } else {
+        txSig = await driftClient.placeSpotOrder(orderParams);
+      }
+
+      logger.info('Close position order placed successfully', {
+        txSignature: txSig,
+        userId: ctx.userId,
+        dexAccountId,
+        authority: dexAccount.address,
+        marketIndex: data.marketIndex,
+        marketType: data.marketType,
+      });
+
+      // Get the order from chain to verify it was placed
+      await driftClient.fetchAccounts();
+      const updatedUser = driftClient.getUser();
+      const orders = updatedUser.getOpenOrders();
+      
+      // Find the order we just placed (it should be the most recent one)
+      const placedOrder = orders[orders.length - 1];
+      
+      // Create order record in database
+      const dbOrder = await this.db.createDriftOrder({
+        dexAccountId,
+        userId: ctx.userId!,
+        driftOrderId: placedOrder?.orderId?.toString(),
+        clientOrderId: placedOrder?.userOrderId?.toString(),
+        marketIndex: data.marketIndex,
+        marketType: data.marketType,
+        direction: direction === PositionDirection.LONG ? 'long' : 'short',
+        baseAssetAmount: baseAssetAmount.toString(),
+        status: 'open',
+        orderType: 'market',
+        reduceOnly: true,
+        rawParams: {
+          txSignature: txSig,
+          placedAt: new Date().toISOString(),
+          delegateAuthority: keypair.publicKey.toString(),
+          closePositionOrder: true,
+        },
+      });
+
+      // Unsubscribe to clean up
+      await driftClient.unsubscribe();
+
+      return {
+        success: true,
+        order: dbOrder,
+        txSignature: txSig,
+        message: 'Position close order placed successfully using delegate',
+        closingDetails: {
+          marketIndex: data.marketIndex,
+          marketType: data.marketType,
+          direction: direction === PositionDirection.LONG ? 'long' : 'short',
+          size: baseAssetAmount.toString(),
+          reduceOnly: true,
+        }
+      };
+
+    } catch (error) {
+      logger.error('Failed to close position using delegate', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
+        userId: ctx.userId,
+        dexAccountId,
+        marketIndex: data.marketIndex,
+        marketType: data.marketType,
+      });
+      
+      if (error instanceof Error && error.message.includes('User not found')) {
+        throw new ApiError(
+          ErrorCode.INVALID_REQUEST, 
+          'User account not initialized on Drift. Please initialize your account first.'
+        );
+      }
+      
+      if (error instanceof ApiError) {
+        throw error;
+      }
+      
+      throw new ApiError(
+        ErrorCode.INTERNAL_ERROR, 
+        `Failed to close position: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
   }
 
   /**
@@ -757,6 +1149,157 @@ export class DriftService {
       throw new ApiError(
         ErrorCode.INTERNAL_ERROR, 
         `Failed to place order: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  /**
+   * Place order - simplified wrapper for delegate order placement
+   */
+  async placeOrder(
+    ctx: RequestContext,
+    dexAccountId: number,
+    params: {
+      marketIndex: number;
+      marketType: 'PERP' | 'SPOT';
+      direction: 'long' | 'short';
+      amount: string;
+      orderType: 'market' | 'limit';
+      price?: string;
+    }
+  ) {
+    const result = await this.placeDelegateOrder(ctx, dexAccountId, {
+      marketIndex: params.marketIndex,
+      marketType: params.marketType,
+      direction: params.direction,
+      baseAssetAmount: params.amount,
+      orderType: params.orderType,
+      price: params.price,
+      immediateOrCancel: params.orderType === 'market',
+    });
+
+    return {
+      ...result,
+      orderId: result.order.id,
+      averagePrice: result.order.price,
+      price: result.order.price,
+    };
+  }
+
+  /**
+   * Cancel order
+   */
+  async cancelOrder(
+    ctx: RequestContext,
+    dexAccountId: number,
+    orderId: number
+  ) {
+    // Get the order from database
+    const orders = await this.db.getDriftOrders({
+      userId: ctx.userId!,
+      dexAccountId,
+    });
+
+    const order = orders.find(o => o.id === orderId);
+    if (!order) {
+      throw new ApiError(ErrorCode.NOT_FOUND, 'Order not found');
+    }
+
+    // Get DEX account
+    const dexAccount = await this.db.getDexAccount(dexAccountId);
+    if (!dexAccount || dexAccount.userId !== ctx.userId) {
+      throw new ApiError(ErrorCode.FORBIDDEN, 'Access denied to this account');
+    }
+
+    // Get the backend private key from environment
+    const privateKeyString = process.env.MAGNOLIA_SOLANA_PRIVATE_KEY;
+    if (!privateKeyString) {
+      throw new ApiError(ErrorCode.INTERNAL_ERROR, 'Backend wallet not configured');
+    }
+
+    try {
+      // Initialize DriftClient with backend wallet
+      const privateKeyBytes = bs58.decode(privateKeyString);
+      const keypair = Keypair.fromSecretKey(privateKeyBytes);
+      
+      const connection = new Connection(this.config.rpcUrl, 'confirmed');
+      
+      const wallet = {
+        publicKey: keypair.publicKey,
+        signTransaction: async (tx: any) => {
+          if (tx.sign && !tx.partialSign) {
+            tx.sign([keypair]);
+          } else if (tx.partialSign) {
+            tx.partialSign(keypair);
+          } else {
+            try {
+              tx.sign([keypair]);
+            } catch {
+              tx.partialSign(keypair);
+            }
+          }
+          return tx;
+        },
+        signAllTransactions: async (txs: any[]) => {
+          txs.forEach(tx => {
+            if (tx.sign && !tx.partialSign) {
+              tx.sign([keypair]);
+            } else if (tx.partialSign) {
+              tx.partialSign(keypair);
+            } else {
+              try {
+                tx.sign([keypair]);
+              } catch {
+                tx.partialSign(keypair);
+              }
+            }
+          });
+          return txs;
+        }
+      };
+
+      const driftClient = new DriftClient({
+        connection,
+        wallet,
+        env: this.config.env as 'mainnet-beta' | 'devnet',
+        programID: new PublicKey(this.config.programId),
+        authority: new PublicKey(dexAccount.address),
+        activeSubAccountId: dexAccount.subaccountId || 0,
+        includeDelegates: false,
+        authoritySubAccountMap: new Map([
+          [dexAccount.address, [dexAccount.subaccountId || 0]]
+        ]),
+      });
+
+      await driftClient.subscribe();
+
+      // Cancel the order
+      const txSig = await driftClient.cancelOrder(
+        order.driftOrderId ? parseInt(order.driftOrderId) : undefined
+      );
+
+      // Update order status in database
+      await this.db.updateDriftOrder(order.id, {
+        status: 'cancelled',
+      });
+
+      await driftClient.unsubscribe();
+
+      return {
+        success: true,
+        txSignature: txSig,
+        message: 'Order cancelled successfully',
+      };
+
+    } catch (error) {
+      logger.error('Failed to cancel order', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        orderId,
+      });
+      
+      throw new ApiError(
+        ErrorCode.INTERNAL_ERROR, 
+        `Failed to cancel order: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
   }

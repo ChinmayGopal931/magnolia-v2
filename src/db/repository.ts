@@ -2,6 +2,7 @@ import { db } from './connection';
 import { eq, and, desc } from 'drizzle-orm';
 import {
   users,
+  userWallets,
   dexAccounts,
   hyperliquidOrders,
   driftOrders,
@@ -12,20 +13,48 @@ import {
 export class DatabaseRepository {
   // ========== User Management ==========
   async findUserByWallet(walletAddress: string) {
-    const [user] = await db
-      .select()
-      .from(users)
-      .where(eq(users.walletAddress, walletAddress))
+    // First check user_wallets table
+    const [wallet] = await db
+      .select({
+        user: users,
+        wallet: userWallets,
+      })
+      .from(userWallets)
+      .innerJoin(users, eq(userWallets.userId, users.id))
+      .where(eq(userWallets.walletAddress, walletAddress))
       .limit(1);
-    return user;
+    
+    return wallet?.user;
   }
 
-  async createUser(walletAddress: string, email?: string) {
+  async createUser(email?: string) {
     const [user] = await db
       .insert(users)
-      .values({ walletAddress, email })
+      .values({ email })
       .returning();
     return user;
+  }
+  
+  async createUserWithWallet(walletAddress: string, walletType: 'evm' | 'solana', email?: string) {
+    return await db.transaction(async (tx) => {
+      // Create user
+      const [user] = await tx
+        .insert(users)
+        .values({ email })
+        .returning();
+      
+      // Create wallet link
+      await tx
+        .insert(userWallets)
+        .values({
+          userId: user.id,
+          walletAddress,
+          walletType,
+          isPrimary: true,
+        });
+      
+      return user;
+    });
   }
 
   async updateUser(userId: number, data: Partial<{ email: string }>) {
@@ -35,6 +64,49 @@ export class DatabaseRepository {
       .where(eq(users.id, userId))
       .returning();
     return updated;
+  }
+  
+  // ========== Wallet Management ==========
+  async linkWallet(userId: number, walletAddress: string, walletType: 'evm' | 'solana') {
+    const [wallet] = await db
+      .insert(userWallets)
+      .values({
+        userId,
+        walletAddress,
+        walletType,
+        isPrimary: false,
+      })
+      .returning();
+    return wallet;
+  }
+  
+  async getUserWallets(userId: number) {
+    return await db
+      .select()
+      .from(userWallets)
+      .where(eq(userWallets.userId, userId))
+      .orderBy(desc(userWallets.isPrimary), userWallets.linkedAt);
+  }
+  
+  async findWalletByAddress(walletAddress: string) {
+    const [wallet] = await db
+      .select()
+      .from(userWallets)
+      .where(eq(userWallets.walletAddress, walletAddress))
+      .limit(1);
+    return wallet;
+  }
+  
+  async getPrimaryWallet(userId: number) {
+    const [wallet] = await db
+      .select()
+      .from(userWallets)
+      .where(and(
+        eq(userWallets.userId, userId),
+        eq(userWallets.isPrimary, true)
+      ))
+      .limit(1);
+    return wallet;
   }
 
   // ========== DEX Account Management ==========
@@ -111,7 +183,8 @@ export class DatabaseRepository {
     userId: number;
     hlOrderId?: string;
     clientOrderId?: string;
-    asset: string;
+    assetSymbol: string;
+    assetIndex: number;
     side: 'buy' | 'sell';
     orderType: string;
     price?: string;
@@ -156,7 +229,8 @@ export class DatabaseRepository {
   async getHyperliquidOrders(filters: {
     userId?: number;
     dexAccountId?: number;
-    asset?: string;
+    assetSymbol?: string;
+    assetIndex?: number;
     status?: 'open' | 'filled' | 'cancelled' | 'failed' | 'pending' | 'rejected' | 'triggered' | 'marginCanceled' | 'liquidatedCanceled' | 'expired';
     clientOrderId?: string;
   }) {
@@ -168,8 +242,11 @@ export class DatabaseRepository {
     if (filters.dexAccountId) {
       conditions.push(eq(hyperliquidOrders.dexAccountId, filters.dexAccountId));
     }
-    if (filters.asset) {
-      conditions.push(eq(hyperliquidOrders.asset, filters.asset));
+    if (filters.assetSymbol) {
+      conditions.push(eq(hyperliquidOrders.assetSymbol, filters.assetSymbol));
+    }
+    if (filters.assetIndex !== undefined) {
+      conditions.push(eq(hyperliquidOrders.assetIndex, filters.assetIndex));
     }
     if (filters.status) {
       conditions.push(eq(hyperliquidOrders.status, filters.status as any));
@@ -285,6 +362,7 @@ export class DatabaseRepository {
   async updatePosition(positionId: number, data: Partial<{
     status: 'open' | 'closed' | 'liquidated';
     totalPnl: string;
+    closedPnl: string;
     closedAt: Date;
     metadata: any;
   }>) {
@@ -294,6 +372,15 @@ export class DatabaseRepository {
       .where(eq(positions.id, positionId))
       .returning();
     return updated;
+  }
+
+  async deletePosition(positionId: number) {
+    // Delete the position (snapshots will be deleted automatically due to CASCADE)
+    const [deleted] = await db
+      .delete(positions)
+      .where(eq(positions.id, positionId))
+      .returning();
+    return deleted;
   }
 
   async getUserPositions(userId: number, filters?: {
@@ -366,17 +453,13 @@ export class DatabaseRepository {
     dexType: 'hyperliquid' | 'drift';
     dexAccountId: number;
     symbol: string;
-    side: 'long' | 'short';
+    side: 'long' | 'short' | 'spot';
     entryPrice: string;
     currentPrice: string;
     markPrice?: string;
+    liquidationPrice?: string;
     size: string;
     notionalValue: string;
-    unrealizedPnl?: string;
-    realizedPnl?: string;
-    fundingRate?: string;
-    fundingPayment?: string;
-    fees?: string;
     hyperliquidOrderId?: number;
     driftOrderId?: number;
     metadata?: any;
@@ -391,11 +474,7 @@ export class DatabaseRepository {
   async updatePositionSnapshot(snapshotId: number, data: Partial<{
     currentPrice: string;
     markPrice: string;
-    unrealizedPnl: string;
-    realizedPnl: string;
-    fundingRate: string;
-    fundingPayment: string;
-    fees: string;
+    liquidationPrice: string;
     metadata: any;
   }>) {
     const [updated] = await db
@@ -404,6 +483,14 @@ export class DatabaseRepository {
       .where(eq(positionSnapshots.id, snapshotId))
       .returning();
     return updated;
+  }
+
+  async getPositionSnapshots(positionId: number) {
+    return await db
+      .select()
+      .from(positionSnapshots)
+      .where(eq(positionSnapshots.positionId, positionId))
+      .orderBy(desc(positionSnapshots.snapshotAt));
   }
 
   async getLatestPositionSnapshots(positionId: number) {

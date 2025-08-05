@@ -26,7 +26,7 @@ export const getTradingInfoHandler = async (
   req: Request,
   res: Response,
   next: NextFunction
-) => {
+): Promise<void> => {
   try {
     const ctx = req.context as RequestContext;
     const { dexAccountId } = req.params;
@@ -35,10 +35,11 @@ export const getTradingInfoHandler = async (
     // Verify access to dex account
     const dexAccount = await db.getDexAccount(Number(dexAccountId));
     if (!dexAccount || dexAccount.userId !== ctx.userId) {
-      return res.status(403).json({
+      res.status(403).json({
         success: false,
         error: 'Access denied to this account'
       });
+      return;
     }
     
     // Get active asset data
@@ -79,6 +80,7 @@ export const getTradingInfoHandler = async (
   } catch (error) {
     next(error);
   }
+  return;
 };
 
 /**
@@ -89,7 +91,7 @@ export const getPositionsHandler = async (
   req: Request,
   res: Response,
   next: NextFunction
-) => {
+): Promise<void> => {
   try {
     const ctx = req.context as RequestContext;
     const { dexAccountId } = req.params;
@@ -97,14 +99,15 @@ export const getPositionsHandler = async (
     // Verify access to dex account
     const dexAccount = await db.getDexAccount(Number(dexAccountId));
     if (!dexAccount || dexAccount.userId !== ctx.userId) {
-      return res.status(403).json({
+      res.status(403).json({
         success: false,
         error: 'Access denied to this account'
       });
+      return;
     }
     
     // Get clearinghouse state (positions and margin)
-    const clearinghouseResponse = await hyperliquidService.getOpenOrdersFromAPI(dexAccount.address);
+    // const clearinghouseResponse = await hyperliquidService.getOpenOrdersFromAPI(dexAccount.address);
     // Use the info client directly
     const axios = (await import('axios')).default;
     const apiUrl = process.env.NETWORK_ENV === 'mainnet' 

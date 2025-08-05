@@ -8,7 +8,7 @@ const devFormat = winston.format.printf(({ level, message, timestamp, service, .
   
   // Handle error objects specially
   if (metadata.error) {
-    const error = metadata.error;
+    const error = metadata.error as any;
     if (error.response?.data) {
       // External API error (like from Hyperliquid)
       msg += `\n  API Error: ${JSON.stringify(error.response.data, null, 2)}`;
@@ -76,8 +76,8 @@ export const logger = winston.createLogger({
   ],
 });
 
-// Add file transport in production
-if (process.env.NODE_ENV === 'production') {
+// Add file transport in production (but not in Lambda)
+if (process.env.NODE_ENV === 'production' && !process.env.AWS_LAMBDA_FUNCTION_NAME) {
   logger.add(
     new winston.transports.File({
       filename: 'logs/error.log',

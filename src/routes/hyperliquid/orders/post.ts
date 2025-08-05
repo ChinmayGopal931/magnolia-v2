@@ -14,7 +14,8 @@ export const placeOrderParamsSchema = z.object({
 
 export const placeOrderBodySchema = z.object({
   orders: z.array(z.object({
-    asset: z.string(),
+    assetSymbol: z.string().min(1), // Asset symbol (e.g., "BTC", "ETH")
+    assetIndex: z.number().int().nonnegative(), // Asset index (numeric ID)
     side: z.enum(['buy', 'sell']),
     orderType: z.enum(['market', 'limit', 'trigger_market', 'trigger_limit', 'oracle']),
     size: z.string(),

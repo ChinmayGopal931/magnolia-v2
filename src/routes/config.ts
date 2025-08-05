@@ -30,7 +30,7 @@ function getDelegateAddress(): string | null {
  * Get current network environment and DEX configurations
  * GET /api/config
  */
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', async (_req: Request, res: Response) => {
   const response: ApiResponse = {
     success: true,
     data: {
@@ -59,7 +59,7 @@ router.get('/', async (req: Request, res: Response) => {
  * Get Drift SDK configuration
  * GET /api/config/drift-sdk
  */
-router.get('/drift-sdk', async (req: Request, res: Response) => {
+router.get('/drift-sdk', async (_req: Request, res: Response) => {
   const response: ApiResponse = {
     success: true,
     data: driftClientConfig.getSDKConfig(),
@@ -72,7 +72,7 @@ router.get('/drift-sdk', async (req: Request, res: Response) => {
  * Get Hyperliquid configuration
  * GET /api/config/hyperliquid
  */
-router.get('/hyperliquid', async (req: Request, res: Response) => {
+router.get('/hyperliquid', async (_req: Request, res: Response) => {
   const response: ApiResponse = {
     success: true,
     data: dexConfig.getHyperliquidConfig(),

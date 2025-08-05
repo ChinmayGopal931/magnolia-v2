@@ -16,7 +16,8 @@ export const getFillsQuerySchema = z.object({
   limit: z.string().transform(Number).optional(),
   startDate: z.string().transform((val) => new Date(val)).optional(),
   endDate: z.string().transform((val) => new Date(val)).optional(),
-  asset: z.string().optional(),
+  assetSymbol: z.string().optional(),
+  assetIndex: z.string().transform((val) => Number(val)).optional(),
 });
 
 export type GetFillsParams = z.infer<typeof getFillsParamsSchema>;
@@ -34,16 +35,17 @@ export const getFillsHandler = async (
   try {
     const ctx = req.context as RequestContext;
     const { dexAccountId } = req.params;
-    const { limit, startDate, endDate, asset } = req.query;
+    const query = req.query as GetFillsQuery;
     
     const result = await hyperliquidService.getFills(
       ctx,
       Number(dexAccountId),
       {
-        limit: limit ? Number(limit) : undefined,
-        startDate: startDate ? new Date(startDate as string) : undefined,
-        endDate: endDate ? new Date(endDate as string) : undefined,
-        asset: asset as string,
+        limit: query.limit,
+        startDate: query.startDate,
+        endDate: query.endDate,
+        assetSymbol: query.assetSymbol,
+        assetIndex: query.assetIndex,
       }
     );
     

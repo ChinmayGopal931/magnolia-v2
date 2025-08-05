@@ -9,7 +9,7 @@ export function errorHandler(
   _next: NextFunction
 ): void {
   // Create a clean error object for logging
-  const logError = {
+  const logError: any = {
     message: error.message,
     path: req.path,
     method: req.method,

@@ -9,7 +9,7 @@ const hyperliquidService = new HyperliquidService();
  * GET /api/hyperliquid/spot/tokens
  */
 export const getSpotTokensHandler = async (
-  req: Request,
+  _req: Request,
   res: Response,
   next: NextFunction
 ) => {

@@ -9,10 +9,10 @@ const driftService = new DriftService();
  * Validation schema for creating delta neutral position
  */
 export const createDeltaNeutralPositionSchema = z.object({
-  name: z.string(),
-  driftOrderId: z.number(),
-  hyperliquidOrderId: z.number(),
-  metadata: z.any().optional(),
+  name: z.string().min(1).max(255),
+  driftOrderId: z.number().int().positive(),
+  hyperliquidOrderId: z.number().int().positive(),
+  metadata: z.record(z.any()).optional(),
 });
 
 export type CreateDeltaNeutralPositionBody = z.infer<typeof createDeltaNeutralPositionSchema>;

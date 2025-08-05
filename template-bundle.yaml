@@ -1,0 +1,55 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Magnolia V2 - Bundled Lambda Function
+
+Parameters:
+  DatabaseUrl:
+    Type: String
+    Description: PostgreSQL connection string
+    NoEcho: true
+    Default: 'postgresql://localhost/magnolia'
+  MagnoliaSolanaPrivateKey:
+    Type: String
+    Description: Solana private key for Drift trading (base58 format)
+    NoEcho: true
+    Default: ''
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 30
+    MemorySize: 512
+    Environment:
+      Variables:
+        NODE_ENV: production
+
+Resources:
+  # API Lambda Function (bundled)
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: magnolia-v2-api
+      CodeUri: .aws-sam/build/
+      Handler: lambda-bundle.handler
+      Environment:
+        Variables:
+          DATABASE_URL: !Ref DatabaseUrl
+          ALLOWED_ORIGINS: "http://localhost:5173,http://localhost:3000,http://localhost:3001"
+          NODE_ENV: production
+          MAGNOLIA_SOLANA_PRIVATE_KEY: !Ref MagnoliaSolanaPrivateKey
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+        HealthCheck:
+          Type: Api
+          Properties:
+            Path: /health
+            Method: GET
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod'

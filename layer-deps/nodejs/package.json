@@ -1,0 +1,12 @@
+{
+  "name": "magnolia-layer",
+  "version": "1.0.0",
+  "dependencies": {
+    "@nktkas/hyperliquid": "^0.23.1",
+    "drizzle-orm": "^0.29.3",
+    "ethers": "^6.10.0",
+    "postgres": "^3.4.3",
+    "@drift-labs/sdk": "^2.128.0-beta.7",
+    "@solana/web3.js": "^1.98.2"
+  }
+}

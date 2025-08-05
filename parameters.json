@@ -1,0 +1,6 @@
+[
+  {
+    "ParameterKey": "DatabaseUrl",
+    "ParameterValue": "postgresql://magnolia_admin:Magnolia1754189353%21@magnolia-v2-db.cmbo2u8wu5qp.us-east-1.rds.amazonaws.com:5432/magnolia?sslmode=require"
+  }
+]

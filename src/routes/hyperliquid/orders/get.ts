@@ -13,7 +13,8 @@ export const getOrdersParamsSchema = z.object({
 });
 
 export const getOrdersQuerySchema = z.object({
-  asset: z.string().optional(),
+  assetSymbol: z.string().optional(),
+  assetIndex: z.string().optional().transform((val) => val ? Number(val) : undefined),
   status: z.enum(['pending', 'open', 'filled', 'cancelled', 'rejected', 'failed']).optional(),
 });
 
@@ -32,14 +33,15 @@ export const getOrdersHandler = async (
   try {
     const ctx = req.context as RequestContext;
     const { dexAccountId } = req.params;
-    const { asset, status } = req.query;
+    const query = req.query as GetOrdersQuery;
     
     const result = await hyperliquidService.getOrders(
       ctx,
       Number(dexAccountId),
       {
-        asset: asset as string,
-        status: status as 'open' | 'filled' | 'cancelled' | 'failed' | 'pending' | 'rejected' | 'triggered' | 'marginCanceled' | 'liquidatedCanceled' | 'expired' | undefined,
+        assetSymbol: query.assetSymbol,
+        assetIndex: query.assetIndex,
+        status: query.status as 'open' | 'filled' | 'cancelled' | 'failed' | 'pending' | 'rejected' | 'triggered' | 'marginCanceled' | 'liquidatedCanceled' | 'expired' | undefined,
       }
     );
     

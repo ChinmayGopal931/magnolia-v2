@@ -19,15 +19,34 @@ export const orderStatusEnum = pgEnum('order_status', [
 ]);
 export const positionStatusEnum = pgEnum('position_status', ['open', 'closed', 'liquidated']);
 export const positionTypeEnum = pgEnum('position_type', ['single', 'delta_neutral']);
-export const legSideEnum = pgEnum('leg_side', ['long', 'short']);
+export const legSideEnum = pgEnum('leg_side', ['long', 'short', 'spot']);
+export const walletTypeEnum = pgEnum('wallet_type', ['evm', 'solana']);
 
 // Users table
 export const users = pgTable('users', {
   id: serial('id').primaryKey(),
-  walletAddress: text('wallet_address').notNull().unique(),
   email: text('email'),
+  telegramChatId: text('telegram_chat_id'),
+  telegramUsername: text('telegram_username'),
+  telegramVerified: boolean('telegram_verified').default(false).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// User wallets table - links wallets to users
+export const userWallets = pgTable('user_wallets', {
+  id: serial('id').primaryKey(),
+  userId: integer('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  walletAddress: text('wallet_address').notNull().unique(),
+  walletType: walletTypeEnum('wallet_type').notNull(),
+  isPrimary: boolean('is_primary').default(false).notNull(),
+  linkedAt: timestamp('linked_at').defaultNow().notNull(),
+}, (table) => {
+  return {
+    userIdIdx: index('idx_user_wallets_user_id').on(table.userId),
+    walletAddressIdx: index('idx_user_wallets_address').on(table.walletAddress),
+    primaryWalletIdx: index('idx_user_wallets_primary').on(table.userId, table.isPrimary),
+  };
 });
 
 // DEX Accounts table
@@ -61,7 +80,8 @@ export const hyperliquidOrders = pgTable('hyperliquid_orders', {
   userId: integer('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   hlOrderId: numeric('hl_order_id', { precision: 20, scale: 0 }),
   clientOrderId: text('client_order_id').unique(), // cloid - 128 bit hex string
-  asset: text('asset').notNull(), // coin name or index
+  assetSymbol: text('asset_symbol').notNull(), // coin symbol (e.g., "BTC", "ETH")
+  assetIndex: integer('asset_index').notNull(), // numeric index for the asset
   side: orderSideEnum('side').notNull(),
   orderType: text('order_type').notNull(), // market, limit, trigger_market, trigger_limit, oracle
   price: numeric('price', { precision: 30, scale: 10 }),
@@ -90,7 +110,7 @@ export const hyperliquidOrders = pgTable('hyperliquid_orders', {
     accountIdx: index('idx_hl_orders_account').on(table.dexAccountId),
     statusIdx: index('idx_hl_orders_status').on(table.status),
     clientIdIdx: index('idx_hl_orders_client_id').on(table.clientOrderId),
-    assetStatusIdx: index('idx_hl_orders_asset_status').on(table.asset, table.status),
+    assetStatusIdx: index('idx_hl_orders_asset_status').on(table.assetSymbol, table.assetIndex, table.status),
     createdIdx: index('idx_hl_orders_created').on(table.createdAt),
   };
 });
@@ -143,6 +163,10 @@ export const positions = pgTable('positions', {
   name: text('name').notNull(),
   status: positionStatusEnum('status').notNull().default('open'),
   totalPnl: numeric('total_pnl', { precision: 30, scale: 10 }).default('0'),
+  closedPnl: numeric('closed_pnl', { precision: 30, scale: 10 }).default('0'),
+  notificationsEnabled: boolean('notifications_enabled').default(true).notNull(),
+  fundingOptimizationEnabled: boolean('funding_optimization_enabled').default(false).notNull(),
+  lastAlertSentAt: timestamp('last_alert_sent_at'),
   metadata: jsonb('metadata').default({}).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   closedAt: timestamp('closed_at'),
@@ -152,6 +176,8 @@ export const positions = pgTable('positions', {
     userStatusIdx: index('idx_positions_user_status').on(table.userId, table.status),
     typeStatusIdx: index('idx_positions_type_status').on(table.positionType, table.status),
     createdIdx: index('idx_positions_created').on(table.createdAt),
+    alertsIdx: index('idx_positions_alerts').on(table.status, table.notificationsEnabled),
+    fundingOptIdx: index('idx_positions_funding_opt').on(table.status, table.fundingOptimizationEnabled),
   };
 });
 
@@ -162,17 +188,13 @@ export const positionSnapshots = pgTable('position_snapshots', {
   dexType: dexTypeEnum('dex_type').notNull(),
   dexAccountId: integer('dex_account_id').notNull().references(() => dexAccounts.id, { onDelete: 'cascade' }),
   symbol: text('symbol').notNull(), // e.g., "ETH-PERP", "BTC-USD"
-  side: legSideEnum('side').notNull(), // long or short
+  side: legSideEnum('side').notNull(), // long, short, or spot
   entryPrice: numeric('entry_price', { precision: 30, scale: 10 }).notNull(),
   currentPrice: numeric('current_price', { precision: 30, scale: 10 }).notNull(),
   markPrice: numeric('mark_price', { precision: 30, scale: 10 }), // for calculating unrealized PnL
+  liquidationPrice: numeric('liquidation_price', { precision: 30, scale: 10 }), // price at which position would be liquidated
   size: numeric('size', { precision: 30, scale: 10 }).notNull(),
   notionalValue: numeric('notional_value', { precision: 30, scale: 10 }).notNull(),
-  unrealizedPnl: numeric('unrealized_pnl', { precision: 30, scale: 10 }).default('0'),
-  realizedPnl: numeric('realized_pnl', { precision: 30, scale: 10 }).default('0'),
-  fundingRate: numeric('funding_rate', { precision: 30, scale: 10 }),
-  fundingPayment: numeric('funding_payment', { precision: 30, scale: 10 }),
-  fees: numeric('fees', { precision: 30, scale: 10 }).default('0'),
   hyperliquidOrderId: integer('hyperliquid_order_id').references(() => hyperliquidOrders.id, { onDelete: 'set null' }),
   driftOrderId: integer('drift_order_id').references(() => driftOrders.id, { onDelete: 'set null' }),
   metadata: jsonb('metadata').default({}).notNull(),
@@ -183,15 +205,24 @@ export const positionSnapshots = pgTable('position_snapshots', {
     dexAccountIdx: index('idx_snapshots_dex_account').on(table.dexAccountId),
     snapshotTimeIdx: index('idx_snapshots_time').on(table.snapshotAt),
     positionTimeIdx: index('idx_snapshots_position_time').on(table.positionId, table.snapshotAt),
+    positionDexIdx: index('idx_snapshots_position_dex').on(table.positionId, table.dexType),
   };
 });
 
 // Relations
 export const usersRelations = relations(users, ({ many }) => ({
+  wallets: many(userWallets),
   dexAccounts: many(dexAccounts),
   hyperliquidOrders: many(hyperliquidOrders),
   driftOrders: many(driftOrders),
   positions: many(positions),
+}));
+
+export const userWalletsRelations = relations(userWallets, ({ one }) => ({
+  user: one(users, {
+    fields: [userWallets.userId],
+    references: [users.id],
+  }),
 }));
 
 export const dexAccountsRelations = relations(dexAccounts, ({ one, many }) => ({

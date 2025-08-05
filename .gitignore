@@ -53,4 +53,7 @@ tmp/
 # Lock files (choose one)
 # package-lock.json
 # yarn.lock
-# pnpm-lock.yaml
+# pnpm-lock.yamlparameters.json
+
+# Private deployment documentation
+AWS_DEPLOYMENT_GUIDE_PRIVATE.md

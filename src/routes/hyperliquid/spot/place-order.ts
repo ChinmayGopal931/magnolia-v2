@@ -14,7 +14,8 @@ export const placeSpotOrderParamsSchema = z.object({
 
 export const placeSpotOrderBodySchema = z.object({
   orders: z.array(z.object({
-    asset: z.string(), // e.g., "PURR/USDC", "BTC/USDC"
+    assetSymbol: z.string().min(1), // e.g., "PURR/USDC", "BTC/USDC"
+    assetIndex: z.number().int().min(10000), // Spot pairs have ID >= 10000
     side: z.enum(['buy', 'sell']),
     orderType: z.enum(['market', 'limit']),
     size: z.string(),
@@ -47,7 +48,15 @@ export const placeSpotOrderHandler = async (
     
     // Transform spot orders to include spot asset IDs
     const spotOrders = req.body.orders.map((order: any) => {
-      // Parse spot pair (e.g., "PURR/USDC" -> "PURR")
+      // If assetId is provided, use it directly
+      if (order.assetId) {
+        return {
+          ...order,
+          isSpot: true, // Flag to indicate this is a spot order
+        };
+      }
+      
+      // Otherwise, parse spot pair (e.g., "PURR/USDC" -> "PURR") for backward compatibility
       const [baseAsset] = order.asset.split('/');
       
       return {

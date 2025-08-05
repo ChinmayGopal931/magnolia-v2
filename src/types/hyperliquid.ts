@@ -224,7 +224,10 @@ export interface CancelResponse {
 
 // Validation Schemas
 export const OrderRequestSchema = z.object({
-  asset: z.string(),
+  asset: z.string().optional(), // Asset symbol for backward compatibility
+  assetId: z.number().optional(), // Asset ID for backward compatibility
+  assetSymbol: z.string().optional(), // New field for asset symbol
+  assetIndex: z.number().optional(), // New field for asset index
   side: z.enum(['buy', 'sell']),
   orderType: z.enum(['market', 'limit', 'trigger_market', 'trigger_limit', 'oracle']),
   size: z.string(),
@@ -251,7 +254,8 @@ export const PlaceOrderRequestSchema = z.object({
 
 export const CancelOrderRequestSchema = z.object({
   cancels: z.array(z.object({
-    asset: z.string(),
+    asset: z.string(), // Asset symbol for backward compatibility
+    assetId: z.number().optional(), // Asset ID (required if asset not provided)
     orderId: z.string(),
   })),
   signature: z.string().optional(), // Optional - will sign server-side if not provided
@@ -260,7 +264,8 @@ export const CancelOrderRequestSchema = z.object({
 
 export const CancelByCloidRequestSchema = z.object({
   cancels: z.array(z.object({
-    asset: z.string(),
+    asset: z.string(), // Asset symbol for backward compatibility
+    assetId: z.number().optional(), // Asset ID (required if asset not provided)
     cloid: z.string(),
   })),
   signature: z.string().optional(), // Optional - will sign server-side if not provided
