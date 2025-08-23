@@ -9,6 +9,7 @@ import driftRoutes from './routes/drift';
 import configRoutes from './routes/config';
 import positionsRoutes from './routes/positions';
 import authRoutes from './routes/auth';
+import jobsRoutes from './routes/jobs';
 
 // Load environment variables
 dotenv.config();
@@ -50,6 +51,7 @@ app.use('/api/config', configRoutes);
 app.use('/api/positions', positionsRoutes);
 app.use('/api/hyperliquid', hyperliquidRoutes);
 app.use('/api/drift', driftRoutes);
+app.use('/api/jobs', jobsRoutes);
 
 // 404 handler
 app.use((req, res) => {

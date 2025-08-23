@@ -3,6 +3,7 @@ import { authenticateUser } from '@/middleware/auth';
 import { validateRequest } from '@/middleware/validation';
 import { getPositionsHandler, getPositionsQuerySchema } from './get';
 import { createPositionHandler, createPositionBodySchema } from './post';
+import { createCustomOrderPositionHandler, createCustomOrderPositionBodySchema } from './custom-order';
 import { closePositionHandler, closePositionParamsSchema, closePositionBodySchema } from './close';
 import { deletePositionHandler, deletePositionParamsSchema } from './delete';
 
@@ -35,6 +36,18 @@ router.post(
     body: createPositionBodySchema,
   }),
   createPositionHandler
+);
+
+/**
+ * POST /api/positions/custom-order
+ * Create a new position from orders already executed on the frontend
+ */
+router.post(
+  '/custom-order',
+  validateRequest({
+    body: createCustomOrderPositionBodySchema,
+  }),
+  createCustomOrderPositionHandler
 );
 
 /**

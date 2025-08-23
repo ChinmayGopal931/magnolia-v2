@@ -6,6 +6,7 @@ import {
   dexAccounts,
   hyperliquidOrders,
   driftOrders,
+  lighterOrders,
   positions,
   positionSnapshots,
 } from './schema';
@@ -294,6 +295,38 @@ export class DatabaseRepository {
     return order;
   }
 
+  // ========== Lighter Orders ==========
+  async createLighterOrder(data: {
+    dexAccountId: number;
+    userId: number;
+    lighterOrderId?: string;
+    clientOrderIndex?: number;
+    marketId: number;
+    side: 'buy' | 'sell';
+    orderType: string;
+    price?: string;
+    baseAmount: string;
+    filledAmount?: string;
+    avgFillPrice?: string;
+    status?: 'open' | 'filled' | 'cancelled' | 'failed' | 'pending' | 'rejected' | 'triggered' | 'marginCanceled' | 'liquidatedCanceled' | 'expired';
+    timeInForce?: string;
+    reduceOnly?: boolean;
+    postOnly?: boolean;
+    triggerPrice?: string;
+    triggerCondition?: string;
+    apiKeyIndex?: number;
+    nonce?: string;
+    accountIndex: number;
+    signature?: string;
+    rawParams?: any;
+  }) {
+    const [order] = await db
+      .insert(lighterOrders)
+      .values(data)
+      .returning();
+    return order;
+  }
+
   async updateDriftOrder(orderId: number, data: Partial<{
     driftOrderId: string;
     filledAmount: string;
@@ -400,6 +433,19 @@ export class DatabaseRepository {
       .select()
       .from(positions)
       .where(and(...conditions))
+      .orderBy(desc(positions.createdAt));
+  }
+
+  async getOpenPositionsWithFundingOptimization() {
+    return await db
+      .select()
+      .from(positions)
+      .where(
+        and(
+          eq(positions.status, 'open'),
+          eq(positions.fundingOptimizationEnabled, true)
+        )
+      )
       .orderBy(desc(positions.createdAt));
   }
 
@@ -512,6 +558,14 @@ export class DatabaseRepository {
     }
     
     return Array.from(latestByDexSymbol.values());
+  }
+
+  async deletePositionSnapshot(snapshotId: number) {
+    const [deleted] = await db
+      .delete(positionSnapshots)
+      .where(eq(positionSnapshots.id, snapshotId))
+      .returning();
+    return deleted;
   }
 
   // ========== Transactions ==========

@@ -1,5 +1,6 @@
 import { app } from './app';
 import { logger } from './utils/logger';
+import { initializeScheduler, setupGracefulShutdown } from './jobs/scheduler';
 
 const PORT = process.env.PORT || 3000;
 
@@ -8,15 +9,11 @@ app.listen(PORT, () => {
   logger.info(`Server is running on port ${PORT}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
   logger.info(`Network: ${process.env.NETWORK_ENV || 'testnet'}`);
+  
+  // Initialize job scheduler
+  initializeScheduler();
+  logger.info('Job scheduler initialized');
 });
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM signal received: closing HTTP server');
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  logger.info('SIGINT signal received: closing HTTP server');
-  process.exit(0);
-});
+// Setup graceful shutdown
+setupGracefulShutdown();

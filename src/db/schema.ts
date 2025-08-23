@@ -2,7 +2,7 @@ import { pgTable, serial, text, timestamp, boolean, jsonb, numeric, integer, pgE
 import { relations } from 'drizzle-orm';
 
 // Enums
-export const dexTypeEnum = pgEnum('dex_type', ['hyperliquid', 'drift']);
+export const dexTypeEnum = pgEnum('dex_type', ['hyperliquid', 'drift', 'lighter']);
 export const accountTypeEnum = pgEnum('account_type', ['master', 'agent_wallet', 'subaccount']);
 export const orderSideEnum = pgEnum('order_side', ['buy', 'sell']);
 export const orderStatusEnum = pgEnum('order_status', [
@@ -155,6 +155,45 @@ export const driftOrders = pgTable('drift_orders', {
   };
 });
 
+// Lighter Orders table
+export const lighterOrders = pgTable('lighter_orders', {
+  id: serial('id').primaryKey(),
+  dexAccountId: integer('dex_account_id').notNull().references(() => dexAccounts.id, { onDelete: 'cascade' }),
+  userId: integer('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  lighterOrderId: text('lighter_order_id'),
+  clientOrderIndex: integer('client_order_index').unique(),
+  marketId: integer('market_id').notNull(), // uint8 in Lighter (0-255)
+  side: orderSideEnum('side').notNull(),
+  orderType: text('order_type').notNull(), // ORDER_TYPE_LIMIT, ORDER_TYPE_MARKET, etc.
+  price: numeric('price', { precision: 30, scale: 10 }),
+  baseAmount: numeric('base_amount', { precision: 30, scale: 10 }).notNull(),
+  filledAmount: numeric('filled_amount', { precision: 30, scale: 10 }).default('0'),
+  avgFillPrice: numeric('avg_fill_price', { precision: 30, scale: 10 }),
+  status: orderStatusEnum('status').notNull().default('pending'),
+  timeInForce: text('time_in_force'), // ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL, etc.
+  reduceOnly: boolean('reduce_only').default(false),
+  postOnly: boolean('post_only').default(false),
+  triggerPrice: numeric('trigger_price', { precision: 30, scale: 10 }),
+  triggerCondition: text('trigger_condition'), // stop_loss, take_profit
+  apiKeyIndex: integer('api_key_index'), // 0-254, API key used for signing
+  nonce: numeric('nonce', { precision: 20, scale: 0 }), // Nonce for transaction signing
+  accountIndex: integer('account_index').notNull(), // Lighter account index
+  signature: text('signature'),
+  rawParams: jsonb('raw_params'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => {
+  return {
+    userIdx: index('idx_lighter_orders_user').on(table.userId),
+    accountIdx: index('idx_lighter_orders_account').on(table.dexAccountId),
+    statusIdx: index('idx_lighter_orders_status').on(table.status),
+    clientIdIdx: index('idx_lighter_orders_client_id').on(table.clientOrderIndex),
+    marketStatusIdx: index('idx_lighter_orders_market_status').on(table.marketId, table.status),
+    accountIndexIdx: index('idx_lighter_orders_account_index').on(table.accountIndex),
+    createdIdx: index('idx_lighter_orders_created').on(table.createdAt),
+  };
+});
+
 // Positions table
 export const positions = pgTable('positions', {
   id: serial('id').primaryKey(),
@@ -197,6 +236,7 @@ export const positionSnapshots = pgTable('position_snapshots', {
   notionalValue: numeric('notional_value', { precision: 30, scale: 10 }).notNull(),
   hyperliquidOrderId: integer('hyperliquid_order_id').references(() => hyperliquidOrders.id, { onDelete: 'set null' }),
   driftOrderId: integer('drift_order_id').references(() => driftOrders.id, { onDelete: 'set null' }),
+  lighterOrderId: integer('lighter_order_id').references(() => lighterOrders.id, { onDelete: 'set null' }),
   metadata: jsonb('metadata').default({}).notNull(),
   snapshotAt: timestamp('snapshot_at').defaultNow().notNull(),
 }, (table) => {
@@ -215,6 +255,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   dexAccounts: many(dexAccounts),
   hyperliquidOrders: many(hyperliquidOrders),
   driftOrders: many(driftOrders),
+  lighterOrders: many(lighterOrders),
   positions: many(positions),
 }));
 
@@ -232,6 +273,7 @@ export const dexAccountsRelations = relations(dexAccounts, ({ one, many }) => ({
   }),
   hyperliquidOrders: many(hyperliquidOrders),
   driftOrders: many(driftOrders),
+  lighterOrders: many(lighterOrders),
 }));
 
 export const hyperliquidOrdersRelations = relations(hyperliquidOrders, ({ one, many }) => ({
@@ -253,6 +295,18 @@ export const driftOrdersRelations = relations(driftOrders, ({ one, many }) => ({
   }),
   dexAccount: one(dexAccounts, {
     fields: [driftOrders.dexAccountId],
+    references: [dexAccounts.id],
+  }),
+  positionSnapshots: many(positionSnapshots),
+}));
+
+export const lighterOrdersRelations = relations(lighterOrders, ({ one, many }) => ({
+  user: one(users, {
+    fields: [lighterOrders.userId],
+    references: [users.id],
+  }),
+  dexAccount: one(dexAccounts, {
+    fields: [lighterOrders.dexAccountId],
     references: [dexAccounts.id],
   }),
   positionSnapshots: many(positionSnapshots),
@@ -282,5 +336,9 @@ export const positionSnapshotsRelations = relations(positionSnapshots, ({ one })
   driftOrder: one(driftOrders, {
     fields: [positionSnapshots.driftOrderId],
     references: [driftOrders.id],
+  }),
+  lighterOrder: one(lighterOrders, {
+    fields: [positionSnapshots.lighterOrderId],
+    references: [lighterOrders.id],
   }),
 }));
